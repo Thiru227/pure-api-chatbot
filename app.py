@@ -1,7 +1,7 @@
 """
-RTC Scholar - Production RAG Backend (Failproof)
-=================================================
-Multi-API-key rotation, circuit breaker, retry logic, health monitoring
+RTC Scholar - DIAGNOSTIC VERSION
+=================================
+This version includes detailed logging to diagnose the rate limit issue
 """
 
 from flask import Flask, request, jsonify
@@ -13,289 +13,280 @@ from typing import List, Optional
 from collections import Counter
 import time
 import math
-from threading import Lock
 import logging
-from datetime import datetime, timedelta
+import json
 
 from knowledge_base import KNOWLEDGE_BASE
 
 # ============================================
-# LOGGING SETUP
+# ENHANCED LOGGING
 # ============================================
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # Changed to DEBUG for more detail
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 # ============================================
-# FLASK APP SETUP
+# FLASK APP
 # ============================================
 app = Flask(__name__)
 CORS(app)
 
 # ============================================
-# API KEY MANAGER WITH ROTATION
+# API KEY TESTER
 # ============================================
-class APIKeyManager:
-    """Manages multiple API keys with rotation and circuit breaking"""
+class APIKeyTester:
+    """Test API keys and diagnose issues"""
     
     def __init__(self):
-        # Load multiple API keys from environment
         self.api_keys = self._load_api_keys()
-        self.current_index = 0
-        self.lock = Lock()
+        logger.info(f"🔑 Loaded {len(self.api_keys)} API keys")
         
-        # Circuit breaker: track failures per key
-        self.failures = {key: 0 for key in self.api_keys}
-        self.last_failure_time = {key: None for key in self.api_keys}
-        self.max_failures = 3
-        self.cooldown_period = 300  # 5 minutes
-        
-        logger.info(f"✓ Loaded {len(self.api_keys)} API keys")
-    
     def _load_api_keys(self) -> List[str]:
-        """Load API keys from environment variables"""
+        """Load API keys"""
         keys = []
-        
-        # Primary key
         primary = os.environ.get('OPENROUTER_API_KEY', '')
         if primary:
-            keys.append(primary)
+            keys.append(('PRIMARY', primary))
         
-        # Fallback keys (OPENROUTER_API_KEY_2, OPENROUTER_API_KEY_3, etc.)
         i = 2
         while True:
             key = os.environ.get(f'OPENROUTER_API_KEY_{i}', '')
             if key:
-                keys.append(key)
+                keys.append((f'KEY_{i}', key))
                 i += 1
             else:
                 break
         
-        if not keys:
-            logger.warning("⚠️ No API keys configured!")
-        
         return keys
     
-    def get_next_key(self) -> Optional[str]:
-        """Get next available API key with circuit breaker logic"""
-        with self.lock:
-            if not self.api_keys:
-                return None
-            
-            attempts = 0
-            max_attempts = len(self.api_keys)
-            
-            while attempts < max_attempts:
-                key = self.api_keys[self.current_index]
-                
-                # Check circuit breaker
-                if self._is_key_available(key):
-                    return key
-                
-                # Move to next key
-                self.current_index = (self.current_index + 1) % len(self.api_keys)
-                attempts += 1
-            
-            # All keys are down
-            logger.error("❌ All API keys are unavailable!")
-            return None
-    
-    def _is_key_available(self, key: str) -> bool:
-        """Check if key is available (not in cooldown)"""
-        if self.failures[key] < self.max_failures:
-            return True
+    def test_key(self, name: str, api_key: str) -> dict:
+        """Test a single API key with detailed diagnostics"""
+        logger.info(f"\n{'='*60}")
+        logger.info(f"🧪 Testing {name}")
+        logger.info(f"🔑 Key: {api_key[:15]}...{api_key[-8:]}")
         
-        last_fail = self.last_failure_time[key]
-        if last_fail and (datetime.now() - last_fail).seconds > self.cooldown_period:
-            # Reset after cooldown
-            self.failures[key] = 0
-            self.last_failure_time[key] = None
-            logger.info(f"✓ API key {self._mask_key(key)} recovered from cooldown")
-            return True
+        url = "https://openrouter.ai/api/v1/chat/completions"
         
-        return False
-    
-    def report_failure(self, key: str):
-        """Report a failure for an API key"""
-        with self.lock:
-            self.failures[key] += 1
-            self.last_failure_time[key] = datetime.now()
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://render.com",
+            "X-Title": "RTC-Scholar"
+        }
+        
+        # Minimal test payload
+        payload = {
+            "model": "meta-llama/llama-3.2-3b-instruct:free",
+            "messages": [
+                {"role": "user", "content": "Hi"}
+            ],
+            "max_tokens": 10
+        }
+        
+        result = {
+            'name': name,
+            'key_preview': f"{api_key[:15]}...{api_key[-8:]}",
+            'status': 'unknown',
+            'status_code': None,
+            'error': None,
+            'response_time': None,
+            'raw_response': None
+        }
+        
+        try:
+            logger.info("📤 Sending request...")
+            start_time = time.time()
             
-            if self.failures[key] >= self.max_failures:
-                logger.warning(f"⚠️ API key {self._mask_key(key)} in cooldown")
+            response = requests.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
             
-            # Rotate to next key
-            self.current_index = (self.current_index + 1) % len(self.api_keys)
+            result['response_time'] = time.time() - start_time
+            result['status_code'] = response.status_code
+            
+            logger.info(f"📥 Status Code: {response.status_code}")
+            logger.info(f"⏱️  Response Time: {result['response_time']:.2f}s")
+            logger.info(f"📋 Headers: {dict(response.headers)}")
+            
+            # Log raw response
+            try:
+                result['raw_response'] = response.json()
+                logger.info(f"📄 Response Body: {json.dumps(result['raw_response'], indent=2)}")
+            except:
+                result['raw_response'] = response.text[:500]
+                logger.info(f"📄 Response Text: {response.text[:500]}")
+            
+            if response.status_code == 200:
+                result['status'] = 'SUCCESS ✅'
+                logger.info("✅ KEY WORKS!")
+            
+            elif response.status_code == 401:
+                result['status'] = 'INVALID KEY ❌'
+                result['error'] = 'Authentication failed - key is invalid'
+                logger.error("❌ Invalid API Key")
+            
+            elif response.status_code == 402:
+                result['status'] = 'NO CREDITS ⚠️'
+                result['error'] = 'Insufficient credits'
+                logger.error("⚠️ No credits available")
+            
+            elif response.status_code == 429:
+                result['status'] = 'RATE LIMITED ⏸️'
+                result['error'] = 'Rate limit hit'
+                
+                # Parse rate limit details
+                rate_limit_info = {
+                    'limit': response.headers.get('x-ratelimit-limit'),
+                    'remaining': response.headers.get('x-ratelimit-remaining'),
+                    'reset': response.headers.get('x-ratelimit-reset')
+                }
+                result['rate_limit_info'] = rate_limit_info
+                logger.warning(f"⏸️ Rate Limit: {rate_limit_info}")
+            
+            else:
+                result['status'] = f'ERROR {response.status_code} ❌'
+                result['error'] = response.text[:200]
+                logger.error(f"❌ Unexpected status: {response.status_code}")
+        
+        except requests.exceptions.Timeout:
+            result['status'] = 'TIMEOUT ⏱️'
+            result['error'] = 'Request timed out after 30s'
+            logger.error("⏱️ Request timeout")
+        
+        except Exception as e:
+            result['status'] = 'EXCEPTION 💥'
+            result['error'] = str(e)
+            logger.error(f"💥 Exception: {e}")
+        
+        logger.info(f"{'='*60}\n")
+        return result
     
-    def report_success(self, key: str):
-        """Report a successful call"""
-        with self.lock:
-            if self.failures[key] > 0:
-                self.failures[key] = max(0, self.failures[key] - 1)
-    
-    def _mask_key(self, key: str) -> str:
-        """Mask API key for logging"""
-        return f"{key[:8]}...{key[-4:]}" if len(key) > 12 else "***"
-    
-    def get_status(self) -> dict:
-        """Get status of all keys"""
+    def test_all_keys(self) -> dict:
+        """Test all API keys"""
+        logger.info("\n" + "="*70)
+        logger.info("🧪 STARTING API KEY DIAGNOSTICS")
+        logger.info("="*70 + "\n")
+        
+        results = []
+        
+        for name, key in self.api_keys:
+            result = self.test_key(name, key)
+            results.append(result)
+            time.sleep(2)  # Wait between tests
+        
+        # Summary
+        logger.info("\n" + "="*70)
+        logger.info("📊 DIAGNOSTIC SUMMARY")
+        logger.info("="*70)
+        
+        working = sum(1 for r in results if '✅' in r['status'])
+        rate_limited = sum(1 for r in results if '⏸️' in r['status'])
+        invalid = sum(1 for r in results if '❌' in r['status'])
+        
+        logger.info(f"✅ Working Keys: {working}/{len(results)}")
+        logger.info(f"⏸️ Rate Limited: {rate_limited}/{len(results)}")
+        logger.info(f"❌ Invalid/Error: {invalid}/{len(results)}")
+        logger.info("="*70 + "\n")
+        
         return {
-            "total_keys": len(self.api_keys),
-            "available_keys": sum(1 for k in self.api_keys if self._is_key_available(k)),
-            "keys_in_cooldown": sum(1 for k in self.api_keys if self.failures[k] >= self.max_failures)
+            'total_keys': len(results),
+            'working': working,
+            'rate_limited': rate_limited,
+            'invalid': invalid,
+            'details': results
         }
 
 # ============================================
-# PRODUCTION VECTOR DB WITH BM25
+# SIMPLE VECTOR DB
 # ============================================
-class ProductionVectorDB:
-    """Production-grade retrieval with BM25 ranking"""
+class SimpleVectorDB:
+    """Simplified for testing"""
     
     def __init__(self):
         self.documents = []
-        self.doc_frequencies = {}
-        self.avg_doc_length = 0
-        self.k1 = 1.5
-        self.b = 0.75
-        logger.info("✓ ProductionVectorDB initialized")
     
     def add_documents(self, docs: List[str]):
-        """Add documents and build inverted index"""
         self.documents.extend(docs)
-        self._build_index()
-        logger.info(f"✓ Indexed {len(docs)} documents")
+        logger.info(f"✓ Loaded {len(docs)} documents")
     
-    def _build_index(self):
-        """Build inverted index"""
+    def search(self, query: str, top_k: int = 3) -> List[str]:
+        """Simple keyword search"""
+        query_lower = query.lower()
+        
+        scored = []
         for doc in self.documents:
-            terms = set(self.extract_keywords(doc))
-            for term in terms:
-                self.doc_frequencies[term] = self.doc_frequencies.get(term, 0) + 1
-        
-        total_length = sum(len(self.extract_keywords(doc)) for doc in self.documents)
-        self.avg_doc_length = total_length / len(self.documents) if self.documents else 0
-    
-    def normalize_text(self, text: str) -> str:
-        """Normalize text"""
-        text = re.sub(r'[^\w\s]', ' ', text.lower())
-        return ' '.join(text.split())
-    
-    def extract_keywords(self, text: str) -> List[str]:
-        """Extract keywords with stop word removal"""
-        stop_words = {
-            'what', 'is', 'the', 'who', 'where', 'when', 'how', 'are', 'do',
-            'does', 'about', 'tell', 'me', 'can', 'you', 'a', 'an', 'and',
-            'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'
-        }
-        
-        normalized = self.normalize_text(text)
-        words = [w for w in normalized.split() if w not in stop_words and len(w) > 2]
-        return words
-    
-    def calculate_idf(self, term: str) -> float:
-        """Calculate IDF"""
-        doc_freq = self.doc_frequencies.get(term, 0)
-        if doc_freq == 0:
-            return 0
-        return math.log((len(self.documents) - doc_freq + 0.5) / (doc_freq + 0.5) + 1)
-    
-    def calculate_bm25_score(self, query_terms: List[str], doc: str) -> float:
-        """Calculate BM25 score"""
-        doc_terms = self.extract_keywords(doc)
-        doc_length = len(doc_terms)
-        
-        if doc_length == 0:
-            return 0
-        
-        doc_term_freq = Counter(doc_terms)
-        score = 0
-        
-        for term in query_terms:
-            if term not in doc_term_freq:
-                continue
-            
-            tf = doc_term_freq[term]
-            idf = self.calculate_idf(term)
-            
-            numerator = tf * (self.k1 + 1)
-            denominator = tf + self.k1 * (1 - self.b + self.b * (doc_length / self.avg_doc_length))
-            
-            score += idf * (numerator / denominator)
-        
-        return score
-    
-    def search(self, query: str, top_k: int = 4) -> List[str]:
-        """Search documents"""
-        if not query or not self.documents:
-            return []
-        
-        query_terms = self.extract_keywords(query)
-        
-        scored_docs = []
-        for doc in self.documents:
-            score = self.calculate_bm25_score(query_terms, doc)
+            score = sum(1 for word in query_lower.split() if word in doc.lower())
             if score > 0:
-                scored_docs.append((score, doc))
+                scored.append((score, doc))
         
-        scored_docs.sort(reverse=True, key=lambda x: x[0])
-        return [doc for _, doc in scored_docs[:top_k]]
+        scored.sort(reverse=True)
+        return [doc for _, doc in scored[:top_k]]
 
 # ============================================
-# LLM CALLER WITH RETRY LOGIC
+# INITIALIZE
 # ============================================
-class LLMCaller:
-    """Handles LLM API calls with retry and fallback logic"""
+vector_db = SimpleVectorDB()
+vector_db.add_documents(KNOWLEDGE_BASE)
+
+api_tester = APIKeyTester()
+
+# ============================================
+# ENDPOINTS
+# ============================================
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check"""
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': time.time(),
+        'documents': len(vector_db.documents),
+        'api_keys_configured': len(api_tester.api_keys)
+    }), 200
+
+@app.route('/test-keys', methods=['GET'])
+def test_keys():
+    """Test all API keys and return diagnostic report"""
+    logger.info("🚀 Starting API key diagnostics...")
     
-    def __init__(self, api_key_manager: APIKeyManager):
-        self.api_key_manager = api_key_manager
-        self.url = "https://openrouter.ai/api/v1/chat/completions"
-        self.model = "meta-llama/llama-3.2-3b-instruct:free"
-        self.max_retries = 3
-        self.timeout = 30
+    results = api_tester.test_all_keys()
     
-    def call(self, prompt: str, context: str) -> str:
-        """Call LLM with automatic retry and key rotation"""
+    return jsonify(results), 200
+
+@app.route('/test-single', methods=['POST'])
+def test_single():
+    """Test a single API call with detailed logging"""
+    try:
+        req = request.get_json()
+        query = req.get('query', 'Who is the principal?')
         
-        system_prompt = f"""You are RTC Scholar, a helpful AI assistant for Rathinam Technical Campus.
-
-CONTEXT:
-{context}
-
-INSTRUCTIONS:
-1. Answer using ONLY the context provided
-2. Be accurate and concise (under 100 words)
-3. If context doesn't contain the answer, say so politely
-4. Be friendly and professional
-
-Remember: You represent Rathinam Technical Campus."""
-
-        for attempt in range(self.max_retries):
-            api_key = self.api_key_manager.get_next_key()
-            
-            if not api_key:
-                logger.error("No API keys available")
-                return "⚠️ Service temporarily unavailable. Please try again shortly."
-            
-            try:
-                response = self._make_request(api_key, system_prompt, prompt)
-                
-                if response:
-                    self.api_key_manager.report_success(api_key)
-                    return response
-                
-            except Exception as e:
-                logger.error(f"Attempt {attempt + 1} failed: {e}")
-                self.api_key_manager.report_failure(api_key)
-                
-                if attempt < self.max_retries - 1:
-                    time.sleep(1 * (attempt + 1))  # Exponential backoff
+        if not api_tester.api_keys:
+            return jsonify({
+                'error': 'No API keys configured',
+                'status': 'error'
+            }), 400
         
-        return "Sorry, I'm having trouble responding right now. Please try again! 🔄"
-    
-    def _make_request(self, api_key: str, system_prompt: str, user_prompt: str) -> Optional[str]:
-        """Make single API request"""
+        # Use first available key
+        name, api_key = api_tester.api_keys[0]
+        
+        logger.info(f"\n{'='*60}")
+        logger.info(f"🧪 Testing single request with {name}")
+        logger.info(f"❓ Query: {query}")
+        
+        # Get context
+        docs = vector_db.search(query, top_k=2)
+        context = "\n".join(docs) if docs else "No context"
+        
+        logger.info(f"📚 Context length: {len(context)} chars")
+        
+        # Make request
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -304,132 +295,137 @@ Remember: You represent Rathinam Technical Campus."""
         }
         
         payload = {
-            "model": self.model,
+            "model": "meta-llama/llama-3.2-3b-instruct:free",
             "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
+                {
+                    "role": "system",
+                    "content": f"You are a helpful assistant. Context: {context}"
+                },
+                {
+                    "role": "user",
+                    "content": query
+                }
             ],
             "temperature": 0.3,
-            "max_tokens": 300
+            "max_tokens": 150
         }
         
-        response = requests.post(
-            self.url,
-            headers=headers,
-            json=payload,
-            timeout=self.timeout
-        )
+        logger.info("📤 Sending request to OpenRouter...")
+        start_time = time.time()
+        
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        
+        elapsed = time.time() - start_time
+        
+        logger.info(f"📥 Response received in {elapsed:.2f}s")
+        logger.info(f"📊 Status Code: {response.status_code}")
+        logger.info(f"📋 Response Headers: {dict(response.headers)}")
+        
+        result = {
+            'query': query,
+            'status_code': response.status_code,
+            'response_time': elapsed,
+            'headers': dict(response.headers),
+        }
         
         if response.status_code == 200:
             data = response.json()
-            return data['choices'][0]['message']['content']
+            result['success'] = True
+            result['response'] = data['choices'][0]['message']['content']
+            logger.info(f"✅ SUCCESS: {result['response']}")
+        else:
+            result['success'] = False
+            result['error'] = response.text
+            logger.error(f"❌ FAILED: {response.text}")
         
-        # Handle specific error codes
-        if response.status_code in [401, 402, 403]:
-            logger.warning(f"API key issue: {response.status_code}")
-            raise Exception(f"API key error: {response.status_code}")
+        logger.info(f"{'='*60}\n")
         
-        if response.status_code == 429:
-            logger.warning("Rate limit hit")
-            raise Exception("Rate limit")
-        
-        logger.error(f"API error {response.status_code}: {response.text[:200]}")
-        raise Exception(f"API error: {response.status_code}")
-
-# ============================================
-# INITIALIZE COMPONENTS
-# ============================================
-vector_db = ProductionVectorDB()
-vector_db.add_documents(KNOWLEDGE_BASE)
-
-api_key_manager = APIKeyManager()
-llm_caller = LLMCaller(api_key_manager)
-
-logger.info(f"📚 System ready: {len(KNOWLEDGE_BASE)} documents")
-
-# ============================================
-# API ENDPOINTS
-# ============================================
-
-@app.route('/health', methods=['GET'])
-def health_check():
-    """Comprehensive health check"""
-    api_status = api_key_manager.get_status()
+        return jsonify(result), response.status_code
     
-    health_data = {
-        'status': 'healthy' if api_status['available_keys'] > 0 else 'degraded',
-        'timestamp': time.time(),
-        'documents': len(vector_db.documents),
-        'api_keys': api_status,
-        'uptime': time.time()
-    }
-    
-    status_code = 200 if api_status['available_keys'] > 0 else 503
-    
-    return jsonify(health_data), status_code
+    except Exception as e:
+        logger.error(f"💥 Exception: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    """Main chatbot endpoint"""
+    """Regular webhook - logs everything"""
     try:
         req = request.get_json(silent=True, force=True)
         
-        if not req:
-            return jsonify({
-                "reply": "Invalid request format",
-                "status": "error"
-            }), 400
+        logger.info(f"\n{'='*60}")
+        logger.info("📥 WEBHOOK REQUEST")
+        logger.info(f"📋 Payload: {json.dumps(req, indent=2)}")
         
-        # Extract query from various formats
         query_text = (
             req.get('queryResult', {}).get('queryText') if isinstance(req.get('queryResult'), dict)
             else req.get('message') or req.get('query') or req.get('text')
         )
         
         if not query_text:
-            return jsonify({
-                "reply": "No query text provided",
-                "status": "error"
-            }), 400
+            return jsonify({"reply": "No query", "status": "error"}), 400
         
-        logger.info(f"Query: {query_text}")
+        logger.info(f"❓ Query: {query_text}")
         
-        # RAG retrieval
-        relevant_docs = vector_db.search(query_text, top_k=4)
-        context = "\n\n".join(relevant_docs) if relevant_docs else "No relevant information found."
+        # Simple response for now
+        docs = vector_db.search(query_text, top_k=3)
         
-        # LLM call with failover
-        response_text = llm_caller.call(query_text, context)
+        if docs:
+            response = f"Found relevant info: {docs[0][:100]}..."
+        else:
+            response = "No relevant information found in knowledge base."
+        
+        logger.info(f"💬 Response: {response}")
+        logger.info(f"{'='*60}\n")
         
         return jsonify({
-            "reply": response_text,
+            "reply": response,
             "status": "ok"
         })
     
     except Exception as e:
-        logger.error(f"Webhook error: {e}")
-        return jsonify({
-            "reply": "Sorry, something went wrong. Please try again! 🤖",
-            "status": "error"
-        }), 500
+        logger.error(f"❌ Error: {e}")
+        return jsonify({"reply": "Error occurred", "status": "error"}), 500
 
 # ============================================
-# RUN SERVER
+# STARTUP DIAGNOSTICS
+# ============================================
+@app.before_request
+def log_request():
+    """Log every incoming request"""
+    logger.debug(f"📨 {request.method} {request.path} from {request.remote_addr}")
+
+# ============================================
+# RUN
 # ============================================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     
-    logger.info("="*50)
-    logger.info("🚀 RTC Scholar Starting")
+    logger.info("\n" + "="*70)
+    logger.info("🚀 RTC Scholar - DIAGNOSTIC MODE")
+    logger.info("="*70)
     logger.info(f"📊 Documents: {len(vector_db.documents)}")
-    logger.info(f"🔑 API Keys: {len(api_key_manager.api_keys)}")
+    logger.info(f"🔑 API Keys: {len(api_tester.api_keys)}")
     logger.info(f"🌐 Port: {port}")
-    logger.info("="*50)
+    logger.info("")
+    logger.info("🧪 DIAGNOSTIC ENDPOINTS:")
+    logger.info("   GET  /health        - Basic health check")
+    logger.info("   GET  /test-keys     - Test all API keys")
+    logger.info("   POST /test-single   - Test single request with logging")
+    logger.info("   POST /webhook       - Regular webhook (with logs)")
+    logger.info("="*70 + "\n")
+    
+    # Auto-test keys on startup
+    logger.info("🔬 Running startup diagnostics...\n")
+    startup_results = api_tester.test_all_keys()
+    
+    if startup_results['working'] > 0:
+        logger.info("✅ System ready - at least one key works!")
+    else:
+        logger.error("❌ WARNING: No working API keys detected!")
     
     app.run(
         host="0.0.0.0",
         port=port,
         debug=False,
-        use_reloader=False,
-        threaded=True  # Handle concurrent requests
+        use_reloader=False
     )
